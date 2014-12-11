@@ -1,6 +1,6 @@
 // ----------------------------------------------------------------------------
 //
-//  Copyright (C) 2003-2011 Michele Bussolotto <michelebussolotto@gmail.com>
+//  Copyright (C) 2003-2011 Fons Adriaensen <fons@linuxaudio.org>
 //    
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -19,6 +19,12 @@
 // ----------------------------------------------------------------------------
 
 
+// Modified: M. Bussolotto, L. Gabrielli, 2014
+// The original sine generator from Fons takes 50% CPU on a 1GHz ARM Cortex-A8
+// Uses an efficient and numerically robus resonant filter (infinite Q, zero damping)
+// using Chamberlin's state-variable formulation. Current CPU load on the same
+// CPU is ~5%
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,14 +37,11 @@
 
 #include "jack_tone.h"
 
-
-
 static jack_client_t  *jack_handle;
 static jack_port_t    *jack_play;
 static const char     *jack_name;
 static bool            active = false;
-static double p = 0;
-
+static char *options = (char *)"hf:a:o:";
 
 
 int jack_callback (jack_nframes_t nframes, void *arg)
@@ -55,16 +58,13 @@ int jack_callback (jack_nframes_t nframes, void *arg)
 }
 
 
-static char *options = (char *)"hf:a:o:";
-
-
 static void help (void)
 {
     fprintf (stderr, "\njack_tone %s\n", VERSION);
-    fprintf (stderr, "Generate sine wave with an offset value.\n");
+    fprintf (stderr, "Generate sine wave with an optional offset value.\n");
     fprintf (stderr, "Usage: jack_tone <options>\n");
     fprintf (stderr, "  -f  sine frequency in Hz [1000]\n");
-    fprintf (stderr, "  -a  sine amplitude [1]\n");
+    fprintf (stderr, "  -a  sine amplitude [0.5]\n");
     fprintf (stderr, "  -o  offset [0]\n");
     exit (1);
 }
@@ -73,7 +73,7 @@ static void help (void)
 static void procoptions (int ac, char *av [], const char *where)
 {
     int k;
-    
+
     optind = 1;
     opterr = 0;
 
@@ -112,8 +112,7 @@ int main (int ac, char *av [])
     jack_status_t  s;
     frequency = 1000;
     offset = 0;
-    amp = 0.99;
-    p = frequency;
+    amp = 0.5;
     procoptions (ac, av, "On command line:");
 
     if( (amp + offset) > 1){
@@ -140,6 +139,12 @@ int main (int ac, char *av [])
     totalLen = jack_get_buffer_size (jack_handle);
     fsamp = jack_get_sample_rate(jack_handle);
 
+    // FILTER INIT
+    filtCoeff = 2 * M_PI * frequency / fsamp;
+    sinZ = 0.0;
+    cosZ = amp; // initial state != 0 to kich the filter at the beginning
+    //fprintf (stdout, "Starting jack_tone with freq = %f, amp = %f, offset = %f, coefficient = %f\n", frequency, amp, offset, filtCoeff);
+
     active = true;
     while (1)
     {
@@ -149,25 +154,18 @@ int main (int ac, char *av [])
     return 0;
 }
 
+/* ------- process ------- */
 int process (size_t len, float *op)
 {
-    float   a,s;
-    float sinValue;
-
     while (len--)
     {
-	//printf("%d\n",len);
-	a = 2 * (float) M_PI * p; 
-	p += (double)((double)frequency/(double)fsamp);
-	sinValue =  - sinf (a);
-	s = offset + amp*sinValue;
-	if(sinValue < 0.000001 && sinValue > (-0.000001) ){
-	  p = frequency;
-	}
-	*op++ = s;
+        sinZ = sinZ + filtCoeff * cosZ;
+        cosZ = cosZ - filtCoeff * sinZ;
+        *op++ = offset + amp * sinZ;
     }
     return 0;
 }
+
 
 static void jack_shutdown(void *arg)
 {
